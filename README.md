@@ -1,4 +1,6 @@
-# CS336 Spring 2025 Assignment 1: Basics
+# Efficient Transformers
+
+<!-- # CS336 Spring 2025 Assignment 1: Basics
 
 For a full description of the assignment, see the assignment handout at
 [cs336_spring2025_assignment1_basics.pdf](./cs336_spring2025_assignment1_basics.pdf)
@@ -35,7 +37,7 @@ Download the TinyStories data and a subsample of OpenWebText
 
 ``` sh
 mkdir -p data
-cd data
+cd dataset
 
 wget https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt
 wget https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-valid.txt
@@ -47,4 +49,4 @@ gunzip owt_valid.txt.gz
 
 cd ..
 ```
-
+ -->

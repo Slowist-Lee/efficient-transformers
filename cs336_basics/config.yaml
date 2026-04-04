@@ -1,0 +1,23 @@
+model:
+  vocab_size: 50257
+  context_length: 256
+  num_layers: 6 
+  d_model: 384
+  num_heads: 6
+  d_ff: 512
+  use_rope: True
+  theta: 10000.0
+  device: "cpu"
+optim:
+  lr: 1e-4
+  betas: [0.9, 0.95] 
+  eps: 1e-8
+  weight_decay: 0.01
+data:
+  tokenizer_name: "gpt2" 
+train:
+  max_steps: 30
+  max_norm: 1.0
+  txt_path: "datasets/TinyStoriesV2-GPT4-train.txt"
+  bin_path: "datasets/TinyStoriesV2-GPT4-train.bin"
+  batch_size: 96

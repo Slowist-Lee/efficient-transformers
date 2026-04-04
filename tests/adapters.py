@@ -58,8 +58,16 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
-    raise NotImplementedError
+    from cs336_basics.nn_basic import Embedding
+    model = Embedding(
+        num_embeddings=vocab_size, 
+        embedding_dim=d_model,
+        device=weights.device, 
+        dtype=weights.dtype
+    )
+    model.load_state_dict({"weight": weights})
+    output = model(token_ids)
+    return output
 
 
 def run_swiglu(
@@ -87,11 +95,17 @@ def run_swiglu(
     # Example:
     # If your state dict keys match, you can use `load_state_dict()`
     # swiglu.load_state_dict(weights)
-    # You can also manually assign the weights
-    # swiglu.w1.weight.data = w1_weight
-    # swiglu.w2.weight.data = w2_weight
-    # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    from cs336_basics.nn_basic import SwiGLU
+        # def __init__(self, d_model: int, d_ff: int, device=None, dtype=None):
+    swiglu = SwiGLU(
+        d_model=d_model,
+        d_ff=d_ff
+    )
+    swiglu.w1_weight.data = w1_weight
+    swiglu.w2_weight.data = w2_weight
+    swiglu.w3_weight.data = w3_weight
+    output = swiglu(in_features)
+    return output
 
 
 def run_scaled_dot_product_attention(
@@ -112,7 +126,8 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    from cs336_basics.nn_basic import Attention
+    return Attention(q=Q,k=K,v=V,mask=mask)
 
 
 def run_multihead_self_attention(
@@ -146,7 +161,25 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from cs336_basics.nn_basic import MHA
+    Multihead_self_attention = MHA(
+        d_model=d_model,
+        num_heads=num_heads
+    )
+    # 1. 拼接 QKV
+    combined_qkv = torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0)
+
+    # 2. 构建符合路径的字典
+    state_dict = {
+        "qkv_proj.weight": combined_qkv,
+        "o_proj.weight": o_proj_weight
+    }
+    # 3. 加载
+    Multihead_self_attention.load_state_dict(state_dict)
+    output = Multihead_self_attention(in_features)
+    
+    return output
+
 
 
 def run_multihead_self_attention_with_rope(
@@ -186,7 +219,27 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from cs336_basics.nn_basic import MHA
+    Multihead_self_attention = MHA(
+        d_model=d_model,
+        num_heads=num_heads,
+        use_rope=True,
+        max_seq_len=max_seq_len,
+        theta=theta
+    )
+    # 1. 拼接 QKV
+    combined_qkv = torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0)
+
+    # 2. 构建符合路径的字典
+    state_dict = {
+        "qkv_proj.weight": combined_qkv,
+        "o_proj.weight": o_proj_weight
+    }
+    # 3. 加载
+    Multihead_self_attention.load_state_dict(state_dict)
+    output = Multihead_self_attention(in_features,token_positions)
+    
+    return output
 
 
 def run_rope(
@@ -208,7 +261,15 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    from cs336_basics.nn_basic import RoPE
+        # def __init__(self, d_model: int, d_ff: int, device=None, dtype=None):
+    rope = RoPE(
+        theta=theta,
+        d_k=d_k,
+        max_seq_len=max_seq_len
+    )
+    output = rope(in_query_or_key,token_positions)
+    return output
 
 
 def run_transformer_block(
@@ -281,7 +342,51 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    from cs336_basics.nn_basic import Transformer_block
+    import torch
+
+    # 1. 实例化
+    block = Transformer_block(
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        max_seq_len=max_seq_len,
+        theta=theta,
+        use_rope=True
+    )
+
+    # 2. 拼接 QKV (注意：测试权重里叫 attn.q_proj.weight 等)
+    combined_qkv = torch.cat([
+        weights["attn.q_proj.weight"],
+        weights["attn.k_proj.weight"],
+        weights["attn.v_proj.weight"]
+    ], dim=0)
+
+    # 3. 按照你代码中实际的变量名构建 state_dict
+    # 根据报错信息，你定义的变量名分别是：
+    # RMSNorm 里的参数叫 g
+    # 模块名分别叫 Multihead_Attention 和 ffn
+    # FFN 里的权重名可能叫 w1_weight (中间是下划线而不是点)
+    
+    my_state_dict = {
+        "rmsnorm1.g": weights["ln1.weight"],
+        "Multihead_Attention.qkv_proj.weight": combined_qkv,
+        "Multihead_Attention.o_proj.weight": weights["attn.output_proj.weight"],
+        "rmsnorm2.g": weights["ln2.weight"],
+        "ffn.w1_weight": weights["ffn.w1.weight"],
+        "ffn.w2_weight": weights["ffn.w2.weight"],
+        "ffn.w3_weight": weights["ffn.w3.weight"],
+    }
+
+    # 4. 加载并运行
+    block.load_state_dict(my_state_dict)
+    
+    batch_size, seq_len, _ = in_features.shape
+    device = in_features.device
+    token_positions = torch.arange(seq_len, device=device).repeat(batch_size, 1)
+
+    output = block(in_features, token_positions=token_positions)
+    return output
 
 
 def run_transformer_lm(
@@ -363,8 +468,70 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    from cs336_basics.nn_basic import TransformerLM  # 假设你的类定义在这个文件
 
+    # 1. 实例化你的 TransformerLM 模型
+    # 注意：根据你之前的 __init__ 参数名，传入 context_length 作为 max_seq_len
+    model = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        num_layers=num_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        use_rope=True,
+        theta=rope_theta
+    )
+
+    # 2. 构建映射字典 (my_state_dict)
+    # 将参考权重的 key 映射为你代码中定义的变量名
+    my_state_dict = {}
+
+    # A. 基础 Embedding 和 输出层映射
+    my_state_dict["input_embed.weight"] = weights["token_embeddings.weight"]
+    my_state_dict["rmsnorm.g"] = weights["ln_final.weight"]
+    my_state_dict["linear.weight"] = weights["lm_head.weight"]
+
+    # B. 循环处理每一层 Transformer Block
+    for i in range(num_layers):
+        # 参考权重中 Q, K, V 是分开的，如果你的 Multihead_Attention 使用了合并的 qkv_proj，需要拼接
+        q = weights[f"layers.{i}.attn.q_proj.weight"]
+        k = weights[f"layers.{i}.attn.k_proj.weight"]
+        v = weights[f"layers.{i}.attn.v_proj.weight"]
+        combined_qkv = torch.cat([q, k, v], dim=0)
+
+        # 映射层内部组件 (请根据你 Transformer_block 内部实际定义的 self.名称 来调整)
+        prefix = f"layers.{i}."
+        ref_prefix = f"layers.{i}."
+
+        # RMSNorms (参考叫 ln1, ln2; 你的可能叫 rmsnorm1, rmsnorm2，参数叫 g)
+        my_state_dict[f"{prefix}rmsnorm1.g"] = weights[f"{ref_prefix}ln1.weight"]
+        my_state_dict[f"{prefix}rmsnorm2.g"] = weights[f"{ref_prefix}ln2.weight"]
+
+        # Attention
+        my_state_dict[f"{prefix}Multihead_Attention.qkv_proj.weight"] = combined_qkv
+        my_state_dict[f"{prefix}Multihead_Attention.o_proj.weight"] = weights[f"{ref_prefix}attn.output_proj.weight"]
+
+        # FFN (参考叫 ffn.w1.weight; 你的可能叫 ffn.w1_weight)
+        my_state_dict[f"{prefix}ffn.w1_weight"] = weights[f"{ref_prefix}ffn.w1.weight"]
+        my_state_dict[f"{prefix}ffn.w2_weight"] = weights[f"{ref_prefix}ffn.w2.weight"]
+        my_state_dict[f"{prefix}ffn.w3_weight"] = weights[f"{ref_prefix}ffn.w3.weight"]
+
+    # 3. 加载权重到模型
+    model.load_state_dict(my_state_dict)
+    
+    # 确保模型在正确的设备和模式上
+    device = in_indices.device
+    model.to(device)
+    model.eval() # 测试通常使用 eval 模式
+
+    # 4. 运行前向传播
+    with torch.no_grad():
+        # 如果你的 TransformerLM.forward 需要处理位置编码或掩码，确保逻辑正确
+        # 这里假设 model(in_indices) 内部会处理一切
+        logits = model(in_indices)
+
+    return logits
 
 def run_rmsnorm(
     d_model: int,
@@ -386,7 +553,14 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    from cs336_basics.nn_basic import RMSNorm
+    model = RMSNorm(
+        d_model=d_model,
+        eps=eps,
+    )
+    model.load_state_dict({"g": weights})
+    output = model(in_features)
+    return output
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -423,7 +597,8 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    from cs336_basics.data_basic import get_batch
+    return get_batch(dataset=dataset,batch_size=batch_size,context_length=context_length,device=device)
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -439,7 +614,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    from cs336_basics.nn_basic import softmax
+    return softmax(in_features,dim)
 
 
 def run_cross_entropy(
@@ -457,7 +633,8 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    from cs336_basics.nn_basic import Cross_Entropy
+    return Cross_Entropy(inputs,targets)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
@@ -469,14 +646,16 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    from cs336_basics.optim import gradient_clipping
+    return gradient_clipping(parameters=parameters,max_norm=max_l2_norm)
 
 
 def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    from cs336_basics.optim import AdamW
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(
@@ -504,7 +683,8 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    from cs336_basics.optim import get_lr_cosine_schedule
+    return get_lr_cosine_schedule(t=it,alpha_max=max_learning_rate,alpha_min=min_learning_rate,tw=warmup_iters,tc=cosine_cycle_iters)
 
 
 def run_save_checkpoint(
@@ -523,7 +703,8 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
+    from cs336_basics.data_basic import save_checkpoint
+    return save_checkpoint(model=model,optimizer=optimizer,iteration=iteration,out=out)
 
 
 def run_load_checkpoint(
@@ -544,7 +725,8 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    raise NotImplementedError
+    from cs336_basics.data_basic import load_checkpoint
+    return load_checkpoint(src=src,model=model,optimizer=optimizer)    
 
 
 def get_tokenizer(
