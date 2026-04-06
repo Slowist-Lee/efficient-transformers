@@ -1,0 +1,29 @@
+model:
+  vocab_size: 10000
+  context_length: 256
+  num_layers: 4 
+  d_model: 512
+  num_heads: 16
+  d_ff: 1344
+  use_rope: True
+  theta: 10000.0
+  device: "cuda:0"
+optim:
+  lr: 3e-4
+  betas: [0.9, 0.99] 
+  eps: 1e-8
+  weight_decay: 0.01
+data:
+  tokenizer_name: "gpt2" 
+train:
+  max_steps: 10
+  max_norm: 1.0
+  txt_path: "datasets/TinyStoriesV2-GPT4-train.txt"
+  bin_path: "datasets/TinyStoriesV2-GPT4-train.bin"
+  batch_size: 8
+  warmup_steps: 0
+  save_every: 10
+  log_every: 1
+  output_dir: "outputs"
+  read_bytes: 104857600
+  wandb_project: "efficient-transformers"
