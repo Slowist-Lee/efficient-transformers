@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import math
 from einops import einsum
+from torch import autograd
+import triton
+import triton.language as tl
+from .kernel import flash_fwd_kernel
 
 class Identity(nn.Module):
     def __init__(self):
@@ -180,6 +184,217 @@ def Attention(q: torch.Tensor, k:torch.Tensor,v:torch.Tensor,mask=None):
         scaled_score=scaled_score.masked_fill(mask == False, float('-inf'))
     out=einsum(softmax(scaled_score,dim=-1),v,"... seq_q seq_k,... seq_k d_v -> ... seq_q d_v")
     return out
+
+# 使用模块封装attention，使得能够编译
+
+class AttnBlock(nn.Module):
+    def __init__(self, device=None, dtype=None):
+        super().__init__()
+        self.device = device
+        self.dtype = dtype
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # q: (..., seq_q, d_k)
+        # k: (..., seq_k, d_k)
+        # v: (..., seq_k, d_v)
+        d_k = q.size(-1)
+        # (..., seq_q, seq_k)
+        q_dot_k = torch.einsum("...qd,...kd->...qk", q, k)
+        scaled_score = q_dot_k / math.sqrt(d_k)
+        if mask is not None:
+            scaled_score = scaled_score.masked_fill(~mask, float("-inf"))
+        attn = softmax(scaled_score, dim=-1)
+        # (..., seq_q, d_v)
+        out = torch.einsum("...qk,...kd->...qd", attn, v)
+        return out
+
+class FastAttnTriton(autograd.Function):
+    @staticmethod
+    def forward(ctx, q,k,v, is_causal=False):
+        q_block_size = 32
+        kv_block_size = 32
+        # q: (..., seq_q, d_k)
+        # k: (..., seq_k, d_k)
+        # v: (..., seq_k, d_v)
+        d_k = q.size(-1)
+        seq_q = q.size(-2)
+        seq_k = k.size(-2)
+        # 缩放因子：scale
+        scale = 1.0/math.sqrt(d_k)
+        # 改：向上取整
+        num_q_blocks = triton.cdiv(seq_q,q_block_size) # Q 被分成了几个块
+        num_kv_blocks = triton.cdiv(seq_k,kv_block_size) # KV 被分成了几个块
+
+        # 将 Batch 和 Head 维度展平
+        q_flat = q.contiguous().view(-1,seq_q,d_k)
+        k_flat = k.contiguous().view(-1,seq_k,d_k)
+        v_flat = v.contiguous().view(-1,seq_k,d_k)
+
+        group_num = q_flat.shape[0]
+
+        # 初始化输出 O 和 logsumexp L
+        # O保存最终结果，会作为累加起点先要被从零初始化
+        o_flat = torch.zeros_like(q_flat)
+        grid=(num_q_blocks,group_num)
+        
+        # L代表每组每个位置的logsumexp的和
+        l_flat = torch.zeros((group_num, seq_q), device=q.device, dtype=torch.float32)
+
+        # 调用 Triton Kernel
+        flash_fwd_kernel[grid](
+            q_flat, k_flat, v_flat,
+            o_flat, l_flat,
+            q_flat.stride(0), q_flat.stride(1), q_flat.stride(2),
+            k_flat.stride(0), k_flat.stride(1), k_flat.stride(2),
+            v_flat.stride(0), v_flat.stride(1), v_flat.stride(2),
+            o_flat.stride(0), o_flat.stride(1), o_flat.stride(2),
+            l_flat.stride(0), l_flat.stride(1),
+            seq_q, seq_k,
+            scale,
+            D=d_k,
+            Q_TILE_SIZE=q_block_size,
+            K_TILE_SIZE=kv_block_size,
+            IS_CAUSAL=is_causal,
+        )
+
+        out = o_flat.view_as(q)
+        l_flat = l_flat.view(*q.shape[:-1])
+        ctx.is_causal = is_causal
+        ctx.save_for_backward(q,k,v,out,l_flat)
+        return out
+    @staticmethod
+    @torch.compile
+    def backward(ctx,grad_output):
+        Q, K, V, O, L = ctx.saved_tensors
+        is_causal = ctx.is_causal
+        dO = grad_output
+        d_k = Q.shape[-1]
+        seq_q = Q.shape[-2]
+        seq_k = K.shape[-2]
+        D = (O * dO).sum(dim=-1)  # [B, nh, T]
+        scale = 1.0 / math.sqrt(d_k)
+        S = Q @ K.transpose(-2, -1) * scale
+
+
+        if is_causal:
+            # 生成一个右上角为 -inf 的掩码矩阵
+            # 注意 diagonal=1 表示主对角线保留，从主对角线往上一格开始 mask
+            mask = torch.triu(
+                torch.full((seq_q, seq_k), float('-inf'), device=Q.device, dtype=S.dtype), 
+                diagonal=1
+            )
+            S = S + mask
+        
+
+        P = torch.exp(S - L.unsqueeze(-1))
+        dV = P.transpose(-2, -1) @ dO
+        dP = dO @ V.transpose(-2, -1)
+        dS = P * (dP - D.unsqueeze(-1))
+        dQ = dS @ K * scale
+        dK = dS.transpose(-2, -1) @ Q * scale
+        return dQ, dK, dV, None
+
+
+class FastAttn(autograd.Function):
+    @staticmethod
+    def forward(ctx, q,k,v, is_causal=False):
+        q_block_size = 32
+        kv_block_size = 32
+        # q: (..., seq_q, d_k)
+        # k: (..., seq_k, d_k)
+        # v: (..., seq_k, d_v)
+        d_k = q.size(-1)
+        seq_q = q.size(-2)
+        seq_k = k.size(-2)
+        # 缩放因子：scale
+        scale = 1.0/math.sqrt(d_k)
+        # 改：向上取整
+        num_q_blocks = (seq_q + q_block_size - 1) // q_block_size # Q 被分成了几个块
+        num_kv_blocks = (seq_k + kv_block_size - 1) // kv_block_size # KV 被分成了几个块
+
+        # 将 Batch 和 Head 维度展平
+        q_flat = q.contiguous().view(-1,seq_q,d_k)
+        k_flat = k.contiguous().view(-1,seq_k,d_k)
+        v_flat = v.contiguous().view(-1,seq_k,d_k)
+
+        group_num = q_flat.shape[0]
+
+        # 初始化输出 O 和 logsumexp L
+        # O保存最终结果，会作为累加起点先要被从零初始化
+        o_flat = torch.zeros_like(q_flat)
+        # L代表每组每个位置的logsumexp的和
+        l = torch.zeros((group_num, seq_q), device=q.device, dtype=q.dtype)
+        m = torch.full((group_num, seq_q), -float('inf'), device=q.device, dtype=q.dtype)
+
+        # 遍历所有Q
+        for i in range(num_q_blocks):
+            # 计算Q的起始位置
+            q_start = i * q_block_size
+            q_end = min(q_start + q_block_size, seq_q)
+            # 当前q_block：从q_flat里面取
+            # 由于 q_flat = q.contiguous().view(-1,seq_q,d_k)
+            q_block = q_flat[:,q_start:q_end,:]
+            # 当前Q对应的历史统计量
+            # 由于o_flat = torch.zeros_like(q_flat)
+            o_i = o_flat[:,q_start:q_end,:]
+            # 由于l/m = torch.zeros((group_num, seq_q)
+            l_i = l[:,q_start:q_end]
+            m_i = m[:,q_start:q_end]
+            # 内层循环，遍历所有KV分块
+            for j in range(num_kv_blocks):
+                # 取KV块
+                kv_start = j * kv_block_size
+                kv_end = min(kv_start + kv_block_size, seq_k)
+                k_block = k_flat[:,kv_start:kv_end,:]
+                v_block = v_flat[:,kv_start:kv_end,:]
+
+
+                # QK^T
+                s_ij = torch.einsum("...qd,...kd->...qk", q_block, k_block) * scale
+
+                # mask
+                if is_causal:
+                    q_idx = torch.arange(q_start, q_end, device=s_ij.device).view(1, -1, 1)
+                    kv_idx = torch.arange(kv_start, kv_end, device=s_ij.device).view(1, 1, -1)
+                    causal_mask = q_idx >= kv_idx
+                    s_ij = s_ij.masked_fill(~causal_mask, -float('inf')) 
+
+                # 计算softmax
+                # 1. 找目前块的行最大值: 对每个 Q token，求它对一整个 KV 块的最大值
+                m_ij = torch.max(s_ij,dim=-1,keepdim=True)[0] # (group_num, q_block_size, 1)
+                # 2. 找全局最大值 (squeeze的意思：把最后一维消除)
+                m_new = torch.max(m_i, m_ij.squeeze(-1))
+                # 3. 计算当前块指数和
+                exp_new = torch.exp(s_ij - m_new.unsqueeze(-1))
+                sum_exp_new = torch.sum(exp_new, dim=-1)
+                # 4. 更新之前的内容：
+                exp_old = torch.exp(m_i - m_new).unsqueeze(-1)
+                # 更新全局指数和
+                l_new = exp_old.squeeze(-1) * l_i + sum_exp_new
+                # 更新输出O
+                # o_new = exp_old*o_i + exp_new * V
+                o_i = exp_old * o_i + torch.einsum("...qk,...kd->...qd", exp_new, v_block)
+                # 5. 更新迭代量
+                m_i=m_new
+                l_i=l_new
+            
+            o_i=o_i/l_i.unsqueeze(-1)
+            # 写回到最终结果o_flat里
+            o_flat[:, q_start:q_end, :] = o_i
+            # 为了反向传播
+            m[:, q_start:q_end] = m_i
+            l[:, q_start:q_end] = m_i + torch.log(l_i)
+        out = o_flat.view_as(q)
+        ctx.save_for_backward(l,q,k,v,out)
+        return out
+
+
 
 class MHA(nn.Module):
     def __init__(self,d_model:int,num_heads:int,use_rope=False,theta=None,max_seq_len=None,device=None,dtype=None):

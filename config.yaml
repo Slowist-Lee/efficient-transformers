@@ -7,7 +7,7 @@ model:
   d_ff: 1344
   use_rope: True
   theta: 10000.0
-  device: "cuda:0"
+  device: "cuda"
 optim:
   lr: 3e-4
   betas: [0.9, 0.99] 

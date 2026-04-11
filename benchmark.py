@@ -1,3 +1,5 @@
+# 本脚本改自 trainer.py，用来直观地感受前向和反向传播，没有什么优化意义
+
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,7 +17,7 @@ import numpy as np
 import torch
 import timeit
 
-def train(config_path, resume: str = "auto",use_wandb: bool = False):
+def train(config_path):
     config=OmegaConf.load(config_path)
     print("Initialize config.")
     device = config.model.device
