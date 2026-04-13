@@ -26,8 +26,6 @@ wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_
 gunzip owt_valid.txt.gz
 ```
 
-## GuideLine
-
 ## Reports
 
 - GPU 型号： NVIDIA GeForce RTX 5090  
