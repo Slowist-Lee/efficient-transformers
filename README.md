@@ -1,44 +1,22 @@
 # Efficient Transformers
 
-<!-- # CS336 Spring 2025 Assignment 1: Basics
+## Introduction
 
-For a full description of the assignment, see the assignment handout at
-[cs336_spring2025_assignment1_basics.pdf](./cs336_spring2025_assignment1_basics.pdf)
+本项目在 CS336 前两个课程作业的基础上进行融合及修改，手写实现了 Transformers 以及 Efficient LLM 的一些Techniques.
 
-If you see any issues with the assignment handout or code, please feel free to
-raise a GitHub issue or open a pull request with a fix.
+## Quick Start Up
 
-## Setup
+本项目使用`uv`管理环境。
 
-### Environment
-We manage our environments with `uv` to ensure reproducibility, portability, and ease of use.
-Install `uv` [here](https://github.com/astral-sh/uv) (recommended), or run `pip install uv`/`brew install uv`.
-We recommend reading a bit about managing projects in `uv` [here](https://docs.astral.sh/uv/guides/projects/#managing-dependencies) (you will not regret it!).
+- 训练模型：（超参数及路径均可在`config.yaml`内调整）
 
-You can now run any code in the repo using
-```sh
-uv run <python_file_path>
-```
-and the environment will be automatically solved and activated when necessary.
-
-### Run unit tests
-
-
-```sh
-uv run pytest
+```bash
+uv run trainer.py
 ```
 
-Initially, all tests should fail with `NotImplementedError`s.
-To connect your implementation to the tests, complete the
-functions in [./tests/adapters.py](./tests/adapters.py).
+其中 `datasets/` 下需要自行下载 TinyStories 数据集，下载方法：
 
-### Download data
-Download the TinyStories data and a subsample of OpenWebText
-
-``` sh
-mkdir -p data
-cd dataset
-
+```bash
 wget https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt
 wget https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-valid.txt
 
@@ -46,7 +24,28 @@ wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_
 gunzip owt_train.txt.gz
 wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_valid.txt.gz
 gunzip owt_valid.txt.gz
-
-cd ..
 ```
- -->
+
+## GuideLine
+
+## Reports
+
+- GPU 型号： NVIDIA GeForce RTX 5090  
+
+- [Attention Report](final_report.md): 测试Attention Score的计算耗时
+    - 由测量结果来看，原先Attention计算存在大量耗时在 `element-wise kernel` 上。改成Flash Attention后前向传播时间提升了12倍左右。
+- [Flash Attention](final_report_bwd.md): FlashAttention的反向传播使用triton重构后性能提升10倍左右
+- [KV Cache](kvcache_benchmark.csv): 在提前进行warmup缓存之后，生成速度变快，可以看到序列越长，启用KVCache的效果越好
+
+## To Do
+
+打算实现一些新技术，目前只是实现了基础KV Cache，还可以进一步。例如：
+
+- KVCache Evict
+- KVCache Quantization
+- AWQ
+- MLA
+- 一些并行，例如DDP
+
+另外，目前实验对于MEM的测量不够严谨，所以也没做过相关优化，可以再考虑一下
+

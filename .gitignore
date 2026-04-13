@@ -26,9 +26,11 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-datasets/
+datasets/*
 cs336_tests/
 outputs/
+*.sqlite
+*.nsys-rep
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

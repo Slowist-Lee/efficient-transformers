@@ -5,7 +5,7 @@ from einops import einsum
 from torch import autograd
 import triton
 import triton.language as tl
-from .kernel import flash_fwd_kernel
+from .kernel import flash_fwd_kernel,flash_bwd_kernel_dq, flash_bwd_kernel_dk_dv
 
 class Identity(nn.Module):
     def __init__(self):
@@ -269,7 +269,6 @@ class FastAttnTriton(autograd.Function):
         ctx.save_for_backward(q,k,v,out,l_flat)
         return out
     @staticmethod
-    @torch.compile
     def backward(ctx,grad_output):
         Q, K, V, O, L = ctx.saved_tensors
         is_causal = ctx.is_causal
@@ -277,29 +276,89 @@ class FastAttnTriton(autograd.Function):
         d_k = Q.shape[-1]
         seq_q = Q.shape[-2]
         seq_k = K.shape[-2]
-        D = (O * dO).sum(dim=-1)  # [B, nh, T]
-        scale = 1.0 / math.sqrt(d_k)
-        S = Q @ K.transpose(-2, -1) * scale
+        scale = 1.0/math.sqrt(d_k)
+        q_flat = Q.contiguous().view(-1,seq_q,d_k)
+        k_flat = K.contiguous().view(-1,seq_k,d_k)
+        v_flat = V.contiguous().view(-1,seq_k,d_k)
+        o_flat = O.contiguous().view(-1,seq_q,d_k)
+        l_flat = L.contiguous().view(-1,seq_q)
+        dO_flat = dO.contiguous().view(-1,seq_q,d_k)
+        q_block_size = 32
+        kv_block_size = 32
+        group_num = q_flat.shape[0]
+        num_q_blocks = triton.cdiv(seq_q,q_block_size) # Q 被分成了几个块
+        grid_dq=(num_q_blocks,group_num)
+        dQ_flat=torch.zeros_like(q_flat)
+        dK_flat=torch.zeros_like(k_flat)
+        dV_flat=torch.zeros_like(v_flat)
 
+        # 调用 Triton Kernel 1 计算dq
 
-        if is_causal:
-            # 生成一个右上角为 -inf 的掩码矩阵
-            # 注意 diagonal=1 表示主对角线保留，从主对角线往上一格开始 mask
-            mask = torch.triu(
-                torch.full((seq_q, seq_k), float('-inf'), device=Q.device, dtype=S.dtype), 
-                diagonal=1
-            )
-            S = S + mask
-        
+        flash_bwd_kernel_dq[grid_dq](
+            q_flat, k_flat, v_flat, o_flat, l_flat, dO_flat, dQ_flat,
+            q_flat.stride(0), q_flat.stride(1), q_flat.stride(2),
+            k_flat.stride(0), k_flat.stride(1), k_flat.stride(2),
+            v_flat.stride(0), v_flat.stride(1), v_flat.stride(2),
+            o_flat.stride(0), o_flat.stride(1), o_flat.stride(2),
+            l_flat.stride(0), l_flat.stride(1),
+            dO_flat.stride(0), dO_flat.stride(1), dO_flat.stride(2),
+            dQ_flat.stride(0), dQ_flat.stride(1), dQ_flat.stride(2),
+            seq_q, seq_k, scale,
+            D=d_k, Q_TILE_SIZE=q_block_size, K_TILE_SIZE=kv_block_size, IS_CAUSAL=is_causal,
+        )
+        # Kernel 2 计算dk,dv
+        num_kv_blocks = triton.cdiv(seq_k, kv_block_size)
+        grid_dk_dv = (num_kv_blocks, group_num)
 
-        P = torch.exp(S - L.unsqueeze(-1))
-        dV = P.transpose(-2, -1) @ dO
-        dP = dO @ V.transpose(-2, -1)
-        dS = P * (dP - D.unsqueeze(-1))
-        dQ = dS @ K * scale
-        dK = dS.transpose(-2, -1) @ Q * scale
+        flash_bwd_kernel_dk_dv[grid_dk_dv](
+            q_flat, k_flat, v_flat, o_flat, l_flat, dO_flat, dK_flat, dV_flat,
+            q_flat.stride(0), q_flat.stride(1), q_flat.stride(2),
+            k_flat.stride(0), k_flat.stride(1), k_flat.stride(2),
+            v_flat.stride(0), v_flat.stride(1), v_flat.stride(2),
+            o_flat.stride(0), o_flat.stride(1), o_flat.stride(2),
+            l_flat.stride(0), l_flat.stride(1),
+            dO_flat.stride(0), dO_flat.stride(1), dO_flat.stride(2),
+            dK_flat.stride(0), dK_flat.stride(1), dK_flat.stride(2),
+            dV_flat.stride(0), dV_flat.stride(1), dV_flat.stride(2),
+            seq_q, seq_k, scale,
+            D=d_k, Q_TILE_SIZE=q_block_size, K_TILE_SIZE=kv_block_size, IS_CAUSAL=is_causal,
+        )
+
+        dQ = dQ_flat.view_as(Q)
+        dK = dK_flat.view_as(K)
+        dV = dV_flat.view_as(V)
+
         return dQ, dK, dV, None
 
+    # 下面注释的是用torch.compile写的一般backward, 也通过了测试
+    # @torch.compile
+    # def backward(ctx,grad_output):
+    #     Q, K, V, O, L = ctx.saved_tensors
+    #     is_causal = ctx.is_causal
+    #     dO = grad_output
+    #     d_k = Q.shape[-1]
+    #     seq_q = Q.shape[-2]
+    #     seq_k = K.shape[-2]
+    #     D = (O * dO).sum(dim=-1)  # [B, nh, T]
+    #     scale = 1.0 / math.sqrt(d_k)
+    #     S = Q @ K.transpose(-2, -1) * scale
+
+    #     if is_causal:
+    #         # 生成一个右上角为 -inf 的掩码矩阵
+    #         # 注意 diagonal=1 表示主对角线保留，从主对角线往上一格开始 mask
+    #         mask = torch.triu(
+    #             torch.full((seq_q, seq_k), float('-inf'), device=Q.device, dtype=S.dtype), 
+    #             diagonal=1
+    #         )
+    #         S = S + mask
+
+    #     P = torch.exp(S - L.unsqueeze(-1))
+    #     dV = P.transpose(-2, -1) @ dO
+    #     dP = dO @ V.transpose(-2, -1)
+    #     dS = P * (dP - D.unsqueeze(-1))
+    #     dQ = dS @ K * scale
+    #     dK = dS.transpose(-2, -1) @ Q * scale
+    #     return dQ, dK, dV, None
 
 class FastAttn(autograd.Function):
     @staticmethod
@@ -391,9 +450,37 @@ class FastAttn(autograd.Function):
             m[:, q_start:q_end] = m_i
             l[:, q_start:q_end] = m_i + torch.log(l_i)
         out = o_flat.view_as(q)
-        ctx.save_for_backward(l,q,k,v,out)
+        ctx.save_for_backward(q,k,v,out,l)
         return out
+    @staticmethod
+    @torch.compile
+    def backward(ctx,grad_output):
+        Q, K, V, O, L = ctx.saved_tensors
+        is_causal = ctx.is_causal
+        dO = grad_output
+        d_k = Q.shape[-1]
+        seq_q = Q.shape[-2]
+        seq_k = K.shape[-2]
+        D = (O * dO).sum(dim=-1)  # [B, nh, T]
+        scale = 1.0 / math.sqrt(d_k)
+        S = Q @ K.transpose(-2, -1) * scale
 
+        if is_causal:
+            # 生成一个右上角为 -inf 的掩码矩阵
+            # 注意 diagonal=1 表示主对角线保留，从主对角线往上一格开始 mask
+            mask = torch.triu(
+                torch.full((seq_q, seq_k), float('-inf'), device=Q.device, dtype=S.dtype), 
+                diagonal=1
+            )
+            S = S + mask
+
+        P = torch.exp(S - L.unsqueeze(-1))
+        dV = P.transpose(-2, -1) @ dO
+        dP = dO @ V.transpose(-2, -1)
+        dS = P * (dP - D.unsqueeze(-1))
+        dQ = dS @ K * scale
+        dK = dS.transpose(-2, -1) @ Q * scale
+        return dQ, dK, dV, None
 
 
 class MHA(nn.Module):
@@ -413,7 +500,15 @@ class MHA(nn.Module):
         self.use_rope=use_rope
         if use_rope:
             self.rope=RoPE(theta=theta,d_k=d_k,max_seq_len=max_seq_len)
-    def forward(self,x:torch.Tensor,token_positions=None):
+        # 初始 KV Cache 为空
+        self.cache_k = None
+        self.cache_v = None
+
+    def reset_cache(self):
+        self.cache_k = None
+        self.cache_v = None
+
+    def forward(self,x:torch.Tensor,token_positions=None,use_kv_cache: bool = False):
         batch_size, seq_len, _ = x.shape
         # 1. 映射得到 qkv
         # 形状: (batch_size, seq_len, 3 * d_model)
@@ -424,16 +519,34 @@ class MHA(nn.Module):
         # (B, S, 3, H, d_k) -> (3, B, H, S, d_k)
         qkv = qkv.view(batch_size, seq_len, 3, self.num_heads, self.d_k)
         qkv = qkv.permute(2, 0, 3, 1, 4) 
+
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         # 应用RoPE
         if self.use_rope:
             q=self.rope(q,token_positions)
             k=self.rope(k,token_positions)
+
+        # KV Cache 核心逻辑
+        if use_kv_cache:
+            if self.cache_k is None:
+                # 没有KV Cache缓存，保存当下的K和V矩阵
+                self.cache_k = k
+                self.cache_v = v
+            else:
+                # 后续推理（生成阶段）：拼接新 K/V 到缓存
+                self.cache_k = torch.cat([self.cache_k, k], dim=-2)
+                self.cache_v = torch.cat([self.cache_v, v], dim=-2)
+            # 推理时使用缓存的 K/V（历史+新）
+            k = self.cache_k
+            v = self.cache_v            
+            
         # 此时 q, k, v 形状完美变为: (batch_size, num_heads, seq_len, d_k)
         # 定义因果掩码
-        causal_mask = torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device)
-        causal_mask = torch.tril(causal_mask).unsqueeze(0).unsqueeze(0)
+        seq_q = q.size(2)
+        seq_k = k.size(2) # 如果有KV Cache，seq_k 会大于等于 seq_q [!!]
+        causal_mask = torch.ones(seq_q, seq_k, dtype=torch.bool, device=x.device)
+        causal_mask = torch.tril(causal_mask, diagonal=seq_k - seq_q).unsqueeze(0).unsqueeze(0)
 
         # attn_out 形状: (batch_size, num_heads, seq_len, d_k)
         attn_out = Attention(q, k, v, mask=causal_mask)
@@ -468,8 +581,8 @@ class Transformer_block(nn.Module):
             self.rmsnorm2=Identity()
         self.ffn=SwiGLU(d_model=d_model,d_ff=d_ff)
 
-    def forward(self,x: torch.Tensor,token_positions=None) -> torch.Tensor:
-        out1=self.Multihead_Attention(self.rmsnorm1(x),token_positions)
+    def forward(self,x: torch.Tensor,token_positions=None, use_kv_cache: bool = False) -> torch.Tensor:
+        out1=self.Multihead_Attention(self.rmsnorm1(x),token_positions, use_kv_cache=use_kv_cache)
         out1=out1+x
         out2=self.ffn(self.rmsnorm2(out1))
         out=out1+out2
@@ -499,7 +612,7 @@ class TransformerLM(nn.Module):
             self.rmsnorm=Identity()
         self.linear=Linear(in_features=d_model,out_features=vocab_size)
     
-    def forward(self,x: torch.Tensor,token_positions=None) -> torch.Tensor:
+    def forward(self,x: torch.Tensor,token_positions=None,use_kv_cache: bool = False) -> torch.Tensor:
         seq_len = x.size(1)
 
         # 1. 顶层统一处理位置信息 (兜底逻辑)
@@ -512,7 +625,7 @@ class TransformerLM(nn.Module):
         if not self.use_rope:
             x=self.pos_embed(x)
         for layer in self.layers:
-            x=layer(x,token_positions)
+            x=layer(x,token_positions,use_kv_cache=use_kv_cache)
         x=self.rmsnorm(x)
         x=self.linear(x)
         return x
