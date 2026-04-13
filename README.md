@@ -30,10 +30,10 @@ gunzip owt_valid.txt.gz
 
 - GPU 型号： NVIDIA GeForce RTX 5090  
 
-- [Attention Report](final_report.md): 测试Attention Score的计算耗时
+- [Attention Report](results/final_report.md): 测试Attention Score的计算耗时
     - 由测量结果来看，原先Attention计算存在大量耗时在 `element-wise kernel` 上。改成Flash Attention后前向传播时间提升了12倍左右。
-- [Flash Attention](final_report_bwd.md): FlashAttention的反向传播使用triton重构后性能提升10倍左右
-- [KV Cache](kvcache_benchmark.csv): 在提前进行warmup缓存之后，生成速度变快，可以看到序列越长，启用KVCache的效果越好
+- [Flash Attention](results/final_report_bwd.md): FlashAttention的反向传播使用triton重构后性能提升10倍左右
+- [KV Cache](results/kvcache_benchmark.csv): 在提前进行warmup缓存之后，生成速度变快，可以看到序列越长，启用KVCache的效果越好
 
 ## To Do
 
